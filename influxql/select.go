@@ -460,6 +460,11 @@ func buildExprIterator(expr Expr, ic IteratorCreator, opt IteratorOptions, selec
 			return itr, nil
 		}
 	case *BinaryExpr:
+		// If there was no fill, force null fill to ensure LHS and RHS stay in sync.
+		// (opt is a value, not a reference, so modifications should not affect callers' scope.)
+		if opt.Fill == NoFill {
+			opt.Fill = NullFill
+		}
 		if rhs, ok := expr.RHS.(Literal); ok {
 			// The right hand side is a literal. It is more common to have the RHS be a literal,
 			// so we check that one first and have this be the happy path.
