@@ -42,6 +42,8 @@ type Service struct {
 	conn *net.UDPConn
 	addr *net.UDPAddr
 	wg   sync.WaitGroup
+
+	mu   sync.Mutex
 	done chan struct{}
 
 	parserChan chan []byte
@@ -66,7 +68,6 @@ func NewService(c Config) *Service {
 	d := *c.WithDefaults()
 	return &Service{
 		config:      d,
-		done:        make(chan struct{}),
 		parserChan:  make(chan []byte, parserChanLen),
 		batcher:     tsdb.NewPointBatcher(d.BatchSize, d.BatchPending, time.Duration(d.BatchTimeout)),
 		Logger:      log.New(os.Stderr, "[udp] ", log.LstdFlags),
@@ -77,6 +78,13 @@ func NewService(c Config) *Service {
 
 // Open starts the service
 func (s *Service) Open() (err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.done != nil {
+		return nil // Already open.
+	}
+
 	if s.config.BindAddress == "" {
 		return errors.New("bind address has to be specified in config")
 	}
@@ -220,13 +228,25 @@ func (s *Service) parser() {
 
 // Close closes the underlying listener.
 func (s *Service) Close() error {
-	if s.conn == nil {
-		return errors.New("Service already closed")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	select {
+	case <-s.done:
+		// Service is closing...
+		return nil
+	default:
+		if s.done == nil {
+			return nil // Already closed.
+		}
+	}
+	close(s.done)
+
+	if s.conn != nil {
+		s.conn.Close()
 	}
 
-	s.conn.Close()
 	s.batcher.Flush()
-	close(s.done)
 	s.wg.Wait()
 
 	// Release all remaining resources.

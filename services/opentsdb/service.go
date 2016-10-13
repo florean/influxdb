@@ -83,7 +83,6 @@ func NewService(c Config) (*Service, error) {
 	d := c.WithDefaults()
 
 	s := &Service{
-		done:            make(chan struct{}),
 		tls:             d.TLSEnabled,
 		cert:            d.Certificate,
 		err:             make(chan error),
@@ -105,6 +104,10 @@ func NewService(c Config) (*Service, error) {
 func (s *Service) Open() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.done != nil {
+		return nil // Already open.
+	}
 
 	s.Logger.Println("Starting OpenTSDB service")
 
@@ -160,6 +163,16 @@ func (s *Service) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	select {
+	case <-s.done:
+		// Service is closing...
+		return nil
+	default:
+		if s.done == nil {
+			return nil // Already closed.
+		}
+	}
+
 	if s.ln != nil {
 		return s.ln.Close()
 	}
@@ -169,6 +182,7 @@ func (s *Service) Close() error {
 	}
 	close(s.done)
 	s.wg.Wait()
+	s.done = nil
 	return nil
 }
 

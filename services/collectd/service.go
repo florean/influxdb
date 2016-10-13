@@ -50,11 +50,13 @@ type Service struct {
 
 	wg      sync.WaitGroup
 	err     chan error
-	stop    chan struct{}
 	conn    *net.UDPConn
 	batcher *tsdb.PointBatcher
 	typesdb gollectd.Types
 	addr    net.Addr
+
+	mu   sync.Mutex
+	done chan struct{}
 
 	// expvar-based stats.
 	stats       *Statistics
@@ -78,6 +80,14 @@ func NewService(c Config) *Service {
 
 // Open starts the service.
 func (s *Service) Open() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.done != nil {
+		return nil // Already open.
+	}
+	s.done = make(chan struct{})
+
 	s.Logger.Printf("Starting collectd service")
 
 	if s.Config.BindAddress == "" {
@@ -171,8 +181,7 @@ func (s *Service) Open() error {
 	s.batcher = tsdb.NewPointBatcher(s.Config.BatchSize, s.Config.BatchPending, time.Duration(s.Config.BatchDuration))
 	s.batcher.Start()
 
-	// Create channel and wait group for signalling goroutines to stop.
-	s.stop = make(chan struct{})
+	// Create waitgroup for signalling goroutines to stop.
 	s.wg.Add(2)
 
 	// Start goroutines that process collectd packets.
@@ -184,10 +193,21 @@ func (s *Service) Open() error {
 
 // Close stops the service.
 func (s *Service) Close() error {
-	// Close the connection, and wait for the goroutine to exit.
-	if s.stop != nil {
-		close(s.stop)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	select {
+	case <-s.done:
+		// Service is closing...
+		return nil
+	default:
+		if s.done == nil {
+			return nil // Already closed.
+		}
 	}
+	close(s.done)
+
+	// Close the connection, and wait for the goroutine to exit.
 	if s.conn != nil {
 		s.conn.Close()
 	}
@@ -197,10 +217,10 @@ func (s *Service) Close() error {
 	s.wg.Wait()
 
 	// Release all remaining resources.
-	s.stop = nil
 	s.conn = nil
 	s.batcher = nil
 	s.Logger.Println("collectd UDP closed")
+	s.done = nil
 	return nil
 }
 
@@ -269,7 +289,7 @@ func (s *Service) serve() {
 
 	for {
 		select {
-		case <-s.stop:
+		case <-s.done:
 			// We closed the connection, time to go.
 			return
 		default:
@@ -310,7 +330,7 @@ func (s *Service) writePoints() {
 
 	for {
 		select {
-		case <-s.stop:
+		case <-s.done:
 			return
 		case batch := <-s.batcher.Out():
 			if err := s.PointsWriter.WritePoints(s.Config.Database, s.Config.RetentionPolicy, models.ConsistencyLevelAny, batch); err == nil {
